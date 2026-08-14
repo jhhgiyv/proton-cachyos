@@ -1,44 +1,19 @@
-From 3a9db1aac9a9fc8a5f135ee37924b9561293e24b Mon Sep 17 00:00:00 2001
-From: Proton CachyOS <proton-cachyos@example.invalid>
-Date: Fri, 15 Aug 2026 00:00:00 +0800
-Subject: [PATCH] wow64: recognize current thread handles before reading context
-
-The current-thread pseudo-handle may be converted to a real handle while
-crossing the WOW64 boundary.  get_thread_wow64_context() currently only
-recognizes the pseudo-handle, so it asks the server for a context of what is
-actually the calling thread.  With FEX this can enter the suspend path and
-permanently suspend the caller.
-
-Recognize a same-thread real handle by thread id before asking the server for
-the context.  If querying the id fails, retain the existing path so callers
-with only THREAD_GET_CONTEXT access do not gain a new access requirement.
----
- dlls/ntdll/unix/signal_arm64.c | 14 +++++++++++++-
- 1 file changed, 13 insertions(+), 1 deletion(-)
-
-diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
-index 000000000..000000000 100644
---- a/dlls/ntdll/unix/signal_arm64.c
-+++ b/dlls/ntdll/unix/signal_arm64.c
-@@ -623,8 +623,20 @@ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
- {
--    BOOL self = (handle == GetCurrentThread());
+diff --git a/dlls/wow64/syscall.c b/dlls/wow64/syscall.c
+index 4720fe134fad9fd6a4e9e8634a5e0bc968ce35a3..21511c32ac4fca89f5fe72f1c183472a2b9591a2 100644
+--- a/dlls/wow64/syscall.c
++++ b/dlls/wow64/syscall.c
+@@ -572 +572,9 @@ NTSTATUS WINAPI wow64_NtGetContextThread( UINT *args )
+-    if (wow64info->CpuFlags & WOW64_CPUFLAGS_SOFTWARE) RtlWow64SuspendThread( handle, &count );
 +    THREAD_BASIC_INFORMATION info;
 +    BOOL self = (handle == GetCurrentThread());
-     USHORT machine;
-     void *frame;
- 
-+    /*
-+     * A current-thread pseudo-handle can become a real handle after crossing
-+     * the WOW64 boundary.  Do not ask the context server to suspend that
-+     * thread: FEX would otherwise suspend the caller while servicing its own
-+     * context request.  Preserve the old path when this optional query is not
-+     * permitted, since GetThreadContext itself only requires GET_CONTEXT.
-+     */
++
 +    if (!self && !NtQueryInformationThread( handle, ThreadBasicInformation,
 +                                             &info, sizeof(info), NULL ))
 +        self = HandleToULong( info.ClientId.UniqueThread ) == GetCurrentThreadId();
 +
-     switch (size)
-     {
-     case sizeof(I386_CONTEXT): machine = IMAGE_FILE_MACHINE_I386; break;
++    if ((wow64info->CpuFlags & WOW64_CPUFLAGS_SOFTWARE) && !self)
++        RtlWow64SuspendThread( handle, &count );
+@@ -574 +582,2 @@ NTSTATUS WINAPI wow64_NtGetContextThread( UINT *args )
+-    if (wow64info->CpuFlags & WOW64_CPUFLAGS_SOFTWARE) NtResumeThread( handle, &count );
++    if ((wow64info->CpuFlags & WOW64_CPUFLAGS_SOFTWARE) && !self)
++        NtResumeThread( handle, &count );
